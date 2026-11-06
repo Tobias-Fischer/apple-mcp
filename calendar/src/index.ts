@@ -15,7 +15,7 @@ const server = new McpServer({
 
 // --read-only: never register tools that send, create, change or delete data.
 // (Previously only delete tools were hidden; see upstream issue #12.)
-const WRITE_TOOLS = new Set(["create_event", "update_event", "delete_event"]);
+const WRITE_TOOLS = new Set(["create_event", "update_event", "delete_event", "create_meeting", "add_attendees"]);
 if (process.argv.includes("--read-only")) {
   const register = server.registerTool.bind(server) as (...args: any[]) => any;
   (server as any).registerTool = (name: string, ...rest: any[]) =>
@@ -198,6 +198,88 @@ if (!readOnly) {
     }
   );
 }
+
+// ---- create_meeting / add_attendees ----
+const inviteeSchema = z.object({
+  email: z.string().describe("Email address of the invitee"),
+  name: z.string().optional().describe("Display name"),
+  optional: z.boolean().optional().describe("Optional rather than required attendee"),
+});
+const sendConfirm: Record<string, z.ZodTypeAny> = confirmDestructive
+  ? { confirm: z.boolean().optional().describe("Set to true to confirm sending invitations") }
+  : {};
+const json = (v: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(v, null, 2) }] });
+const fail = (err: unknown) => ({ content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true });
+
+server.registerTool(
+  "create_meeting",
+  {
+    description:
+      "Create a meeting and send invitations to the invitees. Use an Exchange or CalDAV calendar " +
+      "(e.g. calendar 'Calendar', account 'Exchange'); the calendar server sends the invitation emails " +
+      "from the user's account. This sends email to other people: confirm the invitees, time and title " +
+      "with the user first, or call with dry_run: true to preview without saving or sending.",
+    inputSchema: z.object({
+      calendar: z.string().describe("Calendar name, e.g. 'Calendar'"),
+      account: z.string().optional().describe("Account/source of the calendar, e.g. 'Exchange' (needed when several calendars share the name)"),
+      summary: z.string().describe("Meeting title"),
+      start_date: z.string().describe("Start, e.g. '2026-11-20 15:00' or '20 November 2026 at 3:00 PM'"),
+      end_date: z.string().describe("End, e.g. '2026-11-20 15:30'"),
+      invitees: z.array(inviteeSchema).min(1).describe("People to invite"),
+      location: z.string().optional().describe("Location or meeting link"),
+      description: z.string().optional().describe("Agenda / notes, included in the invitation"),
+      all_day: z.boolean().optional(),
+      alert_minutes: z.union([z.number(), z.array(z.number())]).optional().describe("Reminder(s), minutes before"),
+      dry_run: z.boolean().optional().describe("Preview only: nothing is saved and no invitations are sent"),
+      ...sendConfirm,
+    }),
+  },
+  async (a: any) => {
+    if (confirmDestructive && !a.dry_run && !a.confirm) {
+      return { content: [{ type: "text", text: "This sends meeting invitations by email. Confirm the invitees, time and title with the user, then call again with confirm: true." }] };
+    }
+    try {
+      return json(await eventkit.createMeeting({
+        calendar: a.calendar, account: a.account, summary: a.summary,
+        startDate: a.start_date, endDate: a.end_date, invitees: a.invitees,
+        location: a.location, description: a.description, allDay: a.all_day,
+        alertMinutes: a.alert_minutes === undefined ? undefined : [a.alert_minutes].flat(),
+        dryRun: a.dry_run,
+      }));
+    } catch (err) {
+      return fail(err);
+    }
+  }
+);
+
+server.registerTool(
+  "add_attendees",
+  {
+    description:
+      "Invite more people to an existing event the user organises (turns a plain event into a meeting). " +
+      "Get the uid from list_events / list_all_events / search_events. Without occurrence_start a recurring " +
+      "event's whole series is updated. Sends invitation emails: confirm with the user first, or use dry_run.",
+    inputSchema: z.object({
+      uid: z.string().describe("Event uid from list/search results"),
+      invitees: z.array(inviteeSchema).min(1),
+      occurrence_start: z.string().optional().describe("For recurring events: start of the single occurrence to change"),
+      dry_run: z.boolean().optional().describe("Preview only: nothing is saved and no invitations are sent"),
+      ...sendConfirm,
+    }),
+  },
+  async (a: any) => {
+    if (confirmDestructive && !a.dry_run && !a.confirm) {
+      return { content: [{ type: "text", text: "This sends meeting invitations by email. Confirm with the user, then call again with confirm: true." }] };
+    }
+    try {
+      return json(await eventkit.addAttendees({
+        uid: a.uid, invitees: a.invitees, occurrenceStart: a.occurrence_start, dryRun: a.dry_run,
+      }));
+    } catch (err) {
+      return fail(err);
+    }
+  }
+);
 
 // ---- search_events ----
 server.registerTool(

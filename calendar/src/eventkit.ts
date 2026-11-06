@@ -85,3 +85,63 @@ export async function searchEvents(
   const raw = await runHelper(args);
   return JSON.parse(raw);
 }
+
+export interface Invitee {
+  email: string;
+  name?: string;
+  optional?: boolean;
+}
+
+function inviteeArgs(invitees: Invitee[]): string[] {
+  const args: string[] = [];
+  for (const i of invitees) {
+    const v = i.name ? `${i.name} <${i.email}>` : i.email;
+    args.push(i.optional ? "--optional-attendee" : "--attendee", v);
+  }
+  return args;
+}
+
+/** Create an event; with invitees on an Exchange/CalDAV calendar this sends meeting invitations. */
+export async function createMeeting(opts: {
+  calendar: string;
+  account?: string;
+  summary: string;
+  startDate: string;
+  endDate: string;
+  invitees: Invitee[];
+  location?: string;
+  description?: string;
+  allDay?: boolean;
+  alertMinutes?: number[];
+  dryRun?: boolean;
+}): Promise<unknown> {
+  const args = [
+    "create-event",
+    "--calendar", opts.calendar,
+    "--title", opts.summary,
+    "--start", dateToISO(opts.startDate),
+    "--end", dateToISO(opts.endDate),
+  ];
+  if (opts.account) args.push("--account", opts.account);
+  if (opts.location) args.push("--location", opts.location);
+  if (opts.description) args.push("--notes", opts.description);
+  if (opts.allDay) args.push("--all-day");
+  for (const m of opts.alertMinutes ?? []) args.push("--alert-minutes", String(m));
+  args.push(...inviteeArgs(opts.invitees));
+  if (opts.dryRun) args.push("--dry-run");
+  return JSON.parse(await runHelper(args));
+}
+
+/** Invite more people to an existing event (whole series, or one occurrence). */
+export async function addAttendees(opts: {
+  uid: string;
+  invitees: Invitee[];
+  occurrenceStart?: string;
+  dryRun?: boolean;
+}): Promise<unknown> {
+  const args = ["add-attendees", "--id", opts.uid];
+  if (opts.occurrenceStart) args.push("--occurrence-start", dateToISO(opts.occurrenceStart));
+  args.push(...inviteeArgs(opts.invitees));
+  if (opts.dryRun) args.push("--dry-run");
+  return JSON.parse(await runHelper(args));
+}
