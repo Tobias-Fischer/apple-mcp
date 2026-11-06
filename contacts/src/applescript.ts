@@ -77,7 +77,7 @@ end tell`;
   });
 }
 
-export async function getContact(name: string): Promise<{
+export interface ContactDetails {
   name: string;
   id: string;
   emails: string[];
@@ -86,15 +86,47 @@ export async function getContact(name: string): Promise<{
   jobTitle: string | null;
   note: string | null;
   addresses: string[];
-}> {
+}
+
+/** AppleScript returns the literal text "missing value" for unset properties. */
+function clean(v: string | undefined): string | null {
+  const t = v?.trim();
+  return t && t !== "missing value" ? t : null;
+}
+
+/**
+ * All contacts with exactly this name (several cards can share a name), or
+ * the single contact with the given id.
+ */
+export async function getContacts(name: string, id?: string): Promise<ContactDetails[]> {
+  if (id) return [await getContactById(id)];
   const safeName = sanitize(name);
+  const raw = await runAppleScript(`
+tell application "Contacts"
+  set AppleScript's text item delimiters to "${FIELD_DELIM}"
+  return (id of every person whose name is "${safeName}") as text
+end tell`);
+  const ids = raw.split(FIELD_DELIM).map((s) => s.trim()).filter(Boolean);
+  if (ids.length === 0) throw new Error(`Contact not found: ${name}`);
+  const out: ContactDetails[] = [];
+  for (const i of ids) out.push(await getContactById(i));
+  return out;
+}
+
+/** Kept for compatibility: the first contact with this name. */
+export async function getContact(name: string): Promise<ContactDetails> {
+  return (await getContacts(name))[0];
+}
+
+export async function getContactById(id: string): Promise<ContactDetails> {
+  const safeId = sanitize(id);
   const script = `
 tell application "Contacts"
-  set matchedPeople to (every person whose name is "${safeName}")
-  if (count of matchedPeople) is 0 then
-    error "Contact not found: ${safeName}"
-  end if
-  set p to item 1 of matchedPeople
+  try
+    set p to person id "${safeId}"
+  on error
+    error "Contact not found with id: ${safeId}"
+  end try
   set contactName to name of p
   set contactId to id of p
 
@@ -159,9 +191,9 @@ end tell`;
     id: parts[1]?.trim() || "",
     emails: parts[2] ? parts[2].split(",").map((s) => s.trim()).filter(Boolean) : [],
     phones: parts[3] ? parts[3].split(",").map((s) => s.trim()).filter(Boolean) : [],
-    organization: parts[4]?.trim() || null,
-    jobTitle: parts[5]?.trim() || null,
-    note: parts[6]?.trim() || null,
+    organization: clean(parts[4]),
+    jobTitle: clean(parts[5]),
+    note: clean(parts[6]),
     addresses: parts[7] ? parts[7].split(FIELD_DELIM).map((s) => s.trim()).filter(Boolean) : [],
   };
 }
@@ -186,6 +218,30 @@ end tell`;
     const [name, id] = record.split(FIELD_DELIM).map((s) => s.trim());
     return { name, id };
   });
+}
+
+/**
+ * AppleScript that binds exactly one person to p: by id when given,
+ * otherwise by name, refusing when several cards share that name.
+ */
+function findPersonScript(name: string, id?: string): string {
+  if (id) {
+    const safeId = sanitize(id);
+    return `  try
+    set p to person id "${safeId}"
+  on error
+    error "Contact not found with id: ${safeId}"
+  end try`;
+  }
+  const safeName = sanitize(name);
+  return `  set matchedPeople to (every person whose name is "${safeName}")
+  if (count of matchedPeople) is 0 then
+    error "Contact not found: ${safeName}"
+  end if
+  if (count of matchedPeople) > 1 then
+    error "" & (count of matchedPeople) & " contacts are named ${safeName}. Use search_contacts to get their ids and pass the id of the one you mean."
+  end if
+  set p to item 1 of matchedPeople`;
 }
 
 export async function createContact(
@@ -222,7 +278,8 @@ end tell`;
 
 export async function updateContact(
   name: string,
-  updates: { firstName?: string; lastName?: string; email?: string; phone?: string; organization?: string; jobTitle?: string; note?: string }
+  updates: { firstName?: string; lastName?: string; email?: string; phone?: string; organization?: string; jobTitle?: string; note?: string },
+  id?: string
 ): Promise<string> {
   const safeName = sanitize(name);
   let setStatements = "";
@@ -241,27 +298,19 @@ export async function updateContact(
   }
   const script = `
 tell application "Contacts"
-  set matchedPeople to (every person whose name is "${safeName}")
-  if (count of matchedPeople) is 0 then
-    error "Contact not found: ${safeName}"
-  end if
-  set p to item 1 of matchedPeople${setStatements}
+${findPersonScript(name, id)}${setStatements}
   save
   return "Contact updated: ${safeName}"
 end tell`;
   return runAppleScript(script);
 }
 
-export async function removeContactFromGroup(contactName: string, groupName: string): Promise<string> {
+export async function removeContactFromGroup(contactName: string, groupName: string, id?: string): Promise<string> {
   const safeName = sanitize(contactName);
   const safeGroup = sanitize(groupName);
   const script = `
 tell application "Contacts"
-  set matchedPeople to (every person whose name is "${safeName}")
-  if (count of matchedPeople) is 0 then
-    error "Contact not found: ${safeName}"
-  end if
-  set p to item 1 of matchedPeople
+${findPersonScript(contactName, id)}
   set g to group "${safeGroup}"
   remove p from g
   save
@@ -285,31 +334,24 @@ end tell`;
   return runAppleScript(script);
 }
 
-export async function deleteContact(name: string): Promise<string> {
+export async function deleteContact(name: string, id?: string): Promise<string> {
   const safeName = sanitize(name);
   const script = `
 tell application "Contacts"
-  set matchedPeople to (every person whose name is "${safeName}")
-  if (count of matchedPeople) is 0 then
-    error "Contact not found: ${safeName}"
-  end if
-  delete item 1 of matchedPeople
+${findPersonScript(name, id)}
+  delete p
   save
   return "Contact deleted: ${safeName}"
 end tell`;
   return runAppleScript(script);
 }
 
-export async function addContactToGroup(contactName: string, groupName: string): Promise<string> {
+export async function addContactToGroup(contactName: string, groupName: string, id?: string): Promise<string> {
   const safeName = sanitize(contactName);
   const safeGroup = sanitize(groupName);
   const script = `
 tell application "Contacts"
-  set matchedPeople to (every person whose name is "${safeName}")
-  if (count of matchedPeople) is 0 then
-    error "Contact not found: ${safeName}"
-  end if
-  set p to item 1 of matchedPeople
+${findPersonScript(contactName, id)}
   set g to group "${safeGroup}"
   add p to g
   save

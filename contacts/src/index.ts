@@ -61,15 +61,21 @@ server.registerTool(
 server.registerTool(
   "get_contact",
   {
-    description: "Get full details of a contact by name including emails, phones, organization, and addresses",
+    description:
+      "Get full details of a contact by name (emails, phones, organization, addresses). Several cards can " +
+      "share a name: then all of them are returned under 'matches'. Pass id (from search_contacts) to get one card.",
     inputSchema: z.object({
       name: z.string().describe("Full name of the contact to retrieve"),
+      id: z.string().optional().describe("Contact id from search_contacts, to pick one card when several share the name"),
     }),
   },
-  async ({ name }) => {
+  async ({ name, id }) => {
     try {
-      const contact = await applescript.getContact(name);
-      return { content: [{ type: "text", text: JSON.stringify(contact, null, 2) }] };
+      const contacts = await applescript.getContacts(name, id);
+      const result = contacts.length === 1
+        ? contacts[0]
+        : { note: `${contacts.length} contacts are named "${name}". All are listed; they may be duplicates of one person.`, matches: contacts };
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true };
     }
@@ -102,6 +108,7 @@ server.registerTool(
     description: "Update an existing contact's details. For email and phone, new entries are added (existing ones are not removed).",
     inputSchema: z.object({
       name: z.string().describe("Full name of the contact to update"),
+      id: z.string().optional().describe("Contact id from search_contacts; required when several contacts share the name"),
       first_name: z.string().optional().describe("New first name"),
       last_name: z.string().optional().describe("New last name"),
       email: z.string().optional().describe("Email address to add"),
@@ -111,7 +118,7 @@ server.registerTool(
       note: z.string().optional().describe("New note"),
     }),
   },
-  async ({ name, first_name, last_name, email, phone, organization, job_title, note }) => {
+  async ({ name, id, first_name, last_name, email, phone, organization, job_title, note }) => {
     try {
       const result = await applescript.updateContact(name, {
         firstName: first_name,
@@ -121,7 +128,7 @@ server.registerTool(
         organization,
         jobTitle: job_title,
         note,
-      });
+      }, id);
       return { content: [{ type: "text", text: result }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true };
@@ -168,15 +175,16 @@ if (!readOnly) {
       description: "Delete a contact by name",
       inputSchema: z.object({
         name: z.string().describe("Full name of the contact to delete"),
+        id: z.string().optional().describe("Contact id from search_contacts; required when several contacts share the name"),
         ...(confirmDestructive ? { confirm: z.boolean().optional().describe("Set to true to confirm this destructive action") } : {}),
       }),
     },
-    async ({ name, confirm }: { name: string; confirm?: unknown }) => {
+    async ({ name, id, confirm }: { name: string; id?: string; confirm?: unknown }) => {
       if (confirmDestructive && !confirm) {
         return { content: [{ type: "text", text: "This will permanently delete the contact. Please confirm with the user, then call again with confirm: true." }] };
       }
       try {
-        const result = await applescript.deleteContact(name);
+        const result = await applescript.deleteContact(name, id);
         return { content: [{ type: "text", text: result }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true };
@@ -211,12 +219,13 @@ server.registerTool(
     description: "Add an existing contact to a group",
     inputSchema: z.object({
       contact_name: z.string().describe("Full name of the contact"),
+      id: z.string().optional().describe("Contact id from search_contacts; required when several contacts share the name"),
       group_name: z.string().describe("Name of the group to add the contact to"),
     }),
   },
-  async ({ contact_name, group_name }) => {
+  async ({ contact_name, group_name, id }) => {
     try {
-      const result = await applescript.addContactToGroup(contact_name, group_name);
+      const result = await applescript.addContactToGroup(contact_name, group_name, id);
       return { content: [{ type: "text", text: result }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true };
@@ -231,12 +240,13 @@ server.registerTool(
     description: "Remove a contact from a group",
     inputSchema: z.object({
       contact_name: z.string().describe("Full name of the contact"),
+      id: z.string().optional().describe("Contact id from search_contacts; required when several contacts share the name"),
       group_name: z.string().describe("Name of the group to remove the contact from"),
     }),
   },
-  async ({ contact_name, group_name }) => {
+  async ({ contact_name, group_name, id }) => {
     try {
-      const result = await applescript.removeContactFromGroup(contact_name, group_name);
+      const result = await applescript.removeContactFromGroup(contact_name, group_name, id);
       return { content: [{ type: "text", text: result }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true };
