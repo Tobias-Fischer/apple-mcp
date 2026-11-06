@@ -21,8 +21,11 @@ export function runAppleScript(script: string): Promise<string> {
   });
 }
 
-const FIELD_DELIM = "|||";
-const RECORD_DELIM = "<<<>>>";
+// ASCII unit/record separators: unlike "|||" and "<<<>>>" they cannot occur in
+// subjects, sender names or message bodies, so fields no longer get scrambled
+// by unusual email text (upstream issue #12).
+const FIELD_DELIM = "\u001f";
+const RECORD_DELIM = "\u001e";
 
 export async function listMailboxes(): Promise<{ name: string; account: string; unreadCount: number }[]> {
   const script = `
