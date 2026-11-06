@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { parseDate } from "./dates.js";
 
 export function sanitize(input: string): string {
   return input
@@ -22,48 +23,22 @@ export function runAppleScript(script: string): Promise<string> {
 }
 
 /**
- * Parse a date string into components, handling various formats:
- * "March 9, 2026", "9 March 2026", "Monday, 9 March 2026",
- * "2026-03-09", "March 15, 2025 at 2:00 PM", etc.
- * Returns locale-independent AppleScript to build the date from components.
+ * Build locale-independent AppleScript that sets `varName` to the given date.
+ * Day is reset to 1 first so that e.g. setting February while "current date"
+ * is the 31st cannot roll over into March.
  */
 export function dateToAppleScript(input: string, varName: string): string {
-  // Strip day names like "Monday, " or "Friday, "
-  const cleaned = input.replace(/^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s*/i, "");
-
-  // Extract time if present (e.g. "at 2:00 PM" or "at 14:00")
-  let hours = 0, minutes = 0;
-  const timeMatch = cleaned.match(/\bat\s+(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
-  if (timeMatch) {
-    hours = parseInt(timeMatch[1]);
-    minutes = parseInt(timeMatch[2]);
-    if (timeMatch[3]?.toUpperCase() === "PM" && hours < 12) hours += 12;
-    if (timeMatch[3]?.toUpperCase() === "AM" && hours === 12) hours = 0;
-  }
-
-  // Remove the time portion for date parsing
-  const dateOnly = cleaned.replace(/\s*\bat\s+\d{1,2}:\d{2}\s*(AM|PM)?/i, "").trim();
-
-  // Try to parse with Date constructor
-  const parsed = new Date(dateOnly);
-  if (isNaN(parsed.getTime())) {
-    throw new Error(`Invalid date: "${input}"`);
-  }
-
-  const year = parsed.getFullYear();
-  const month = parsed.getMonth() + 1; // 1-indexed
-  const day = parsed.getDate();
-
+  const p = parseDate(input);
   const months = ["January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December"];
-
   return `set ${varName} to current date
-set year of ${varName} to ${year}
-set month of ${varName} to ${months[month - 1]}
-set day of ${varName} to ${day}
-set hours of ${varName} to ${hours}
-set minutes of ${varName} to ${minutes}
-set seconds of ${varName} to 0`;
+set day of ${varName} to 1
+set year of ${varName} to ${p.year}
+set month of ${varName} to ${months[p.month - 1]}
+set day of ${varName} to ${p.day}
+set hours of ${varName} to ${p.hours}
+set minutes of ${varName} to ${p.minutes}
+set seconds of ${varName} to ${p.seconds}`;
 }
 
 export async function createEvent(
@@ -102,10 +77,36 @@ end tell`;
   return runAppleScript(script);
 }
 
+/**
+ * AppleScript that finds exactly one event and binds it to `e`.
+ * Errors instead of silently picking the first one when several events share
+ * the same title (upstream issue #12). `matchStart` narrows by start time.
+ */
+function findSingleEventScript(summary: string, calendarName?: string, matchStart?: string): string {
+  const safeSummary = sanitize(summary);
+  const startSetup = matchStart ? dateToAppleScript(matchStart, "matchStart") : "";
+  const cond = `summary is "${safeSummary}"` + (matchStart ? " and start date is matchStart" : "");
+  const collect = calendarName
+    ? `set matchedEvents to (every event of calendar "${sanitize(calendarName)}" whose ${cond})`
+    : `set matchedEvents to {}
+  repeat with c in calendars
+    set matchedEvents to matchedEvents & (every event of c whose ${cond})
+  end repeat`;
+  return `${startSetup}
+  ${collect}
+  if (count of matchedEvents) is 0 then
+    error "Event not found: ${safeSummary}"
+  end if
+  if (count of matchedEvents) > 1 then
+    error "" & (count of matchedEvents) & " events are titled \\"${safeSummary}\\". Specify the calendar and/or match_start (the event's start date and time) to pick one."
+  end if
+  set e to item 1 of matchedEvents`;
+}
+
 export async function updateEvent(
   summary: string,
   calendarName: string | undefined,
-  updates: { newSummary?: string; startDate?: string; endDate?: string; location?: string; description?: string; allDay?: boolean; alertMinutes?: number[] }
+  updates: { matchStart?: string; newSummary?: string; startDate?: string; endDate?: string; location?: string; description?: string; allDay?: boolean; alertMinutes?: number[] }
 ): Promise<string> {
   const safeSummary = sanitize(summary);
   let setStatements = "";
@@ -147,68 +148,22 @@ export async function updateEvent(
     dateSetup += `\n    set end date of e to eventEnd`;
   }
 
-  let script: string;
-  if (calendarName) {
-    const safeCal = sanitize(calendarName);
-    script = `
+  const script = `
 tell application "Calendar"
-  set matchedEvents to (every event of calendar "${safeCal}" whose summary is "${safeSummary}")
-  if (count of matchedEvents) is 0 then
-    error "Event not found: ${safeSummary}"
-  end if
-  set e to item 1 of matchedEvents${setStatements}${dateSetup}
+  ${findSingleEventScript(summary, calendarName, updates.matchStart)}${setStatements}${dateSetup}
   return "Event updated: ${safeSummary}"
 end tell`;
-  } else {
-    script = `
-tell application "Calendar"
-  repeat with c in calendars
-    set matchedEvents to (every event of c whose summary is "${safeSummary}")
-    if (count of matchedEvents) > 0 then
-      set e to item 1 of matchedEvents${setStatements}${dateSetup}
-      return "Event updated: ${safeSummary}"
-    end if
-  end repeat
-  error "Event not found: ${safeSummary}"
-end tell`;
-  }
   return runAppleScript(script);
 }
 
-export async function deleteEvent(summary: string, calendarName?: string): Promise<string> {
+export async function deleteEvent(summary: string, calendarName?: string, matchStart?: string): Promise<string> {
   const safeSummary = sanitize(summary);
-  let scope: string;
-  if (calendarName) {
-    const safeCal = sanitize(calendarName);
-    scope = `events of calendar "${safeCal}"`;
-  } else {
-    // Search across all calendars
-    scope = "";
-  }
-  let script: string;
-  if (calendarName) {
-    script = `
+  const script = `
 tell application "Calendar"
-  set matchedEvents to (${scope} whose summary is "${safeSummary}")
-  if (count of matchedEvents) is 0 then
-    error "Event not found: ${safeSummary}"
-  end if
-  delete item 1 of matchedEvents
+  ${findSingleEventScript(summary, calendarName, matchStart)}
+  delete e
   return "Event deleted: ${safeSummary}"
 end tell`;
-  } else {
-    script = `
-tell application "Calendar"
-  repeat with c in calendars
-    set matchedEvents to (every event of c whose summary is "${safeSummary}")
-    if (count of matchedEvents) > 0 then
-      delete item 1 of matchedEvents
-      return "Event deleted: ${safeSummary}"
-    end if
-  end repeat
-  error "Event not found: ${safeSummary}"
-end tell`;
-  }
   return runAppleScript(script);
 }
 

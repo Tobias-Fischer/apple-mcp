@@ -12,6 +12,15 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
+// --read-only: never register tools that send, create, change or delete data.
+// (Previously only delete tools were hidden; see upstream issue #12.)
+const WRITE_TOOLS = new Set(["create_folder", "create_note", "update_note", "delete_note", "delete_folder", "move_note", "append_to_note"]);
+if (process.argv.includes("--read-only")) {
+  const register = server.registerTool.bind(server) as (...args: any[]) => any;
+  (server as any).registerTool = (name: string, ...rest: any[]) =>
+    WRITE_TOOLS.has(name) ? undefined : register(name, ...rest);
+}
+
 // ---- list_folders ----
 server.registerTool(
   "list_folders",

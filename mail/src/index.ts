@@ -9,6 +9,15 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
+// --read-only: never register tools that send, create, change or delete data.
+// (Previously only delete tools were hidden; see upstream issue #12.)
+const WRITE_TOOLS = new Set(["send_email", "move_message", "mark_read", "delete_message", "flag_message"]);
+if (process.argv.includes("--read-only")) {
+  const register = server.registerTool.bind(server) as (...args: any[]) => any;
+  (server as any).registerTool = (name: string, ...rest: any[]) =>
+    WRITE_TOOLS.has(name) ? undefined : register(name, ...rest);
+}
+
 // ---- list_mailboxes ----
 server.registerTool(
   "list_mailboxes",
