@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { join } from "node:path";
+import { parseDate, toLocalISO } from "./dates.js";
 
 const BINARY = join(__dirname, "reminders-helper");
 
@@ -22,30 +23,8 @@ function runHelper(args: string[]): Promise<string> {
   });
 }
 
-/**
- * Convert a human-readable date string to ISO 8601 for the Swift helper.
- * Handles: "March 9, 2026", "9 March 2026", "2026-03-09",
- * "March 15, 2025 at 2:00 PM", "Monday, 9 March 2026", etc.
- */
 function dateToISO(input: string): string {
-  const cleaned = input.replace(/^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s*/i, "");
-  let hours = 0, minutes = 0;
-  const timeMatch = cleaned.match(/\bat\s+(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
-  if (timeMatch) {
-    hours = parseInt(timeMatch[1]);
-    minutes = parseInt(timeMatch[2]);
-    if (timeMatch[3]?.toUpperCase() === "PM" && hours < 12) hours += 12;
-    if (timeMatch[3]?.toUpperCase() === "AM" && hours === 12) hours = 0;
-  }
-  const dateOnly = cleaned.replace(/\s*\bat\s+\d{1,2}:\d{2}\s*(AM|PM)?/i, "").trim();
-  const parsed = new Date(dateOnly);
-  if (isNaN(parsed.getTime())) throw new Error(`Invalid date: "${input}"`);
-  const year = parsed.getFullYear();
-  const month = String(parsed.getMonth() + 1).padStart(2, "0");
-  const day = String(parsed.getDate()).padStart(2, "0");
-  const hh = String(hours).padStart(2, "0");
-  const mm = String(minutes).padStart(2, "0");
-  return `${year}-${month}-${day}T${hh}:${mm}:00`;
+  return toLocalISO(parseDate(input));
 }
 
 export async function listLists(): Promise<{ name: string; id: string }[]> {
